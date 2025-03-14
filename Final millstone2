@@ -1,0 +1,131 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.utils.data as data
+import optuna
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+
+X = np.random.rand(1000, 20)  
+y = np.random.rand(1000)      
+
+
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+X_test = scaler.transform(X_test)
+
+
+class MovieRatingDataset(data.Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
+    def __len__(self):
+        return len(self.X)
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+class MovieRatingNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim1, hidden_dim2, dropout_rate):
+        super(MovieRatingNN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim1)
+        self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+        self.fc3 = nn.Linear(hidden_dim2, 1)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = self.fc3(x)
+        return x.squeeze()
+
+
+X_train_small, _, y_train_small, _ = train_test_split(X_train, y_train, test_size=0.5, random_state=42)
+
+
+def objective(trial):
+    hidden_dim1 = trial.suggest_int('hidden_dim1', 32, 256)
+    hidden_dim2 = trial.suggest_int('hidden_dim2', 16, 128)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
+    
+    model = MovieRatingNN(input_dim=X_train.shape[1], hidden_dim1=hidden_dim1, hidden_dim2=hidden_dim2, dropout_rate=dropout_rate)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    train_loader = data.DataLoader(MovieRatingDataset(X_train_small, y_train_small), batch_size=batch_size, shuffle=True)
+    val_loader = data.DataLoader(MovieRatingDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
+    
+    
+    for epoch in range(10):
+        model.train()
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            output = model(batch_X)
+            loss = criterion(output, batch_y)
+            loss.backward()
+            optimizer.step()
+    
+    
+    model.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for batch_X, batch_y in val_loader:
+            output = model(batch_X)
+            val_loss += criterion(output, batch_y).item()
+    return val_loss / len(val_loader)
+
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=20)
+best_params = study.best_params
+
+
+hidden_dim1 = best_params['hidden_dim1']
+hidden_dim2 = best_params['hidden_dim2']
+dropout_rate = best_params['dropout_rate']
+batch_size = best_params['batch_size']
+
+
+final_model = MovieRatingNN(input_dim=X_train.shape[1], hidden_dim1=hidden_dim1, hidden_dim2=hidden_dim2, dropout_rate=dropout_rate)
+optimizer = optim.Adam(final_model.parameters(), lr=0.001)
+criterion = nn.MSELoss()
+
+train_loader = data.DataLoader(MovieRatingDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
+test_loader = data.DataLoader(MovieRatingDataset(X_test, y_test), batch_size=batch_size, shuffle=False)
+
+
+for epoch in range(20):  
+    final_model.train()
+    for batch_X, batch_y in train_loader:
+        optimizer.zero_grad()
+        output = final_model(batch_X)
+        loss = criterion(output, batch_y)
+        loss.backward()
+        optimizer.step()
+
+
+final_model.eval()
+test_loss = 0
+num_samples = 0
+
+with torch.no_grad():
+    for batch_X, batch_y in test_loader:
+        output = final_model(batch_X)
+        loss = criterion(output, batch_y).item() * batch_X.size(0)  
+        test_loss += loss
+        num_samples += batch_X.size(0)  
+
+final_mse = test_loss / num_samples  
+print(f"MSE: {final_mse:.6f}")
+
